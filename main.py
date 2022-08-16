@@ -5,9 +5,13 @@ import pandas as pd
 import seaborn as sns
 import matplotlib.pyplot as plt
 
-from sklearn.cluster import DBSCAN
+from sklearn.cluster import KMeans
+from sklearn.metrics import silhouette_score
 from sklearn.ensemble import IsolationForest
+from sklearn.preprocessing import MinMaxScaler
 from sklearn.neighbors import LocalOutlierFactor
+
+from yellowbrick.cluster import silhouette_visualizer
 
 from src.utils import scatter_plot
 
@@ -19,6 +23,10 @@ option_settings = {
     'display.float_format': '{:,.4f}'.format
 }
 [pd.set_option(setting, option) for setting, option in option_settings.items()]
+
+%matplotlib inline
+plt.rcParams["figure.autolayout"] = True
+sns.set_theme(style='darkgrid')
 
 IN_PATH = 'data/in/'
 OUT_PATH = 'data/out/'
@@ -95,16 +103,42 @@ data_users['iso_forest_outliers'] = data_users['iso_forest_outliers'].astype(str
 data_users['iso_forest_scores'] = isf.decision_function(data_users[['edad', 'monto_venta']])
 data_users['iso_forest_outliers'].value_counts()
 
-# %%
 lof = LocalOutlierFactor(n_neighbors=20)
 y_pred = lof.fit_predict(data_users[['edad', 'monto_venta']])
 data_users['lof_outliers'] = y_pred.astype(str)
 data_users['lof_scores'] = lof.negative_outlier_factor_
 data_users['lof_outliers'].value_counts()
 
-# %%
 data_users['outliers_sum'] = (data_users['iso_forest_outliers'].astype(int) + data_users['lof_outliers'].astype(int))
 
+# Inicialmente se trató de hacer un ensamble de dos métodos de detección de outliers para las variables edad y monto_venta;
+# sin embargo, se clasificaron como outliers a personas que tienen un monto elevado debido a que estos han comprado productos bastante 
+# caros, como por ejemplo cocina G.ELECTRIC o video LG ELECTRONICS.
+# El unico outlier que se ha sacado es el que tiene edad de 999
+
+customer_outlier = data_users.loc[data_users['edad'] == data_users['edad'].max(), 'customer_id_']
+data = data[data['customer_id_'] != customer_outlier.values[0]]
+data_users = data_users[data_users['customer_id_'] != customer_outlier.values[0]]
+
+# %% Plots 
+fig, ax = plt.subplots(1, 1, figsize=(6, 5))
+sns.boxplot(data_users.loc[data_users['edad'] < 100, 'edad'], ax=ax)
+fig.suptitle('Boxplot de edad')
+plt.show()
+
+# %% KMeans
+scaler = MinMaxScaler()
+X = data_users[['cuotas', 'edad', 'monto_venta']].copy()
+norm_cols = ['norm_cuotas', 'norm_edad', 'norm_monto_venta']
+data_users[norm_cols] = scaler.fit_transform(X)
+
+print('Silhouette score for:')
+for i in range(3, 11):
+    labels=KMeans(n_clusters=i, init='k-means++', random_state=123).fit(data_users[norm_cols]).labels_
+    score=silhouette_score(data_users[norm_cols], labels, metric='euclidean', random_state=123)
+    print(f'{i} clusters: {score}')
+silhouette_visualizer(KMeans(n_clusters=3, random_state=0), data_users[norm_cols], colors='yellowbrick')
+plt.show()
 
 
 # %%
