@@ -5,6 +5,11 @@ import pandas as pd
 import seaborn as sns
 import matplotlib.pyplot as plt
 
+from scipy import sparse
+from sklearn.metrics.pairwise import cosine_similarity
+
+from statannot import add_stat_annotation
+
 from sklearn.cluster import KMeans
 from sklearn.metrics import silhouette_score
 from sklearn.ensemble import IsolationForest
@@ -60,25 +65,32 @@ data.loc[~data['localcompra'].isin(districts), 'city'] = data.loc[~data['localco
 
 data['customer_id_'] = data['customer_id'] + '_' + data['genero'] + '_' + data['nse']
 
-data.groupby(['jerarquiacompra'])['jerarquiacompra2'].nunique().sort_values(ascending=False)
 
-data = pd.get_dummies(data, columns=['nse', 'genero'])
-data_users = pd.pivot_table(
-    data=data, 
-    index='customer_id_',
-    values=['monto_venta', 'cuotas', 'edad', 'nse_A', 'nse_B', 'nse_C', 'nse_D', 'genero_F', 'genero_M'],
-    aggfunc={
-        'monto_venta': np.mean,
-        'cuotas': np.mean,
-        'edad': np.max,
-        'nse_A': np.max,
-        'nse_B': np.max,
-        'nse_C': np.max,
-        'nse_D': np.max,
-        'genero_F': np.max,
-        'genero_M': np.max
-    }
-).reset_index()
+data['quantity'] = 1
+subdata = pd.DataFrame(data.groupby(['sku'])['quantity'].sum().sort_values(ascending=False))
+sku_list = subdata[subdata['quantity'] > 7].index
+subdf = data[data['sku'].isin(sku_list)].copy()
+
+
+# data.groupby(['jerarquiacompra'])['jerarquiacompra2'].nunique().sort_values(ascending=False)
+
+# data = pd.get_dummies(data, columns=['nse', 'genero'])
+# data_users = pd.pivot_table(
+#     data=data, 
+#     index='customer_id_',
+#     values=['monto_venta', 'cuotas', 'edad', 'nse_A', 'nse_B', 'nse_C', 'nse_D', 'genero_F', 'genero_M'],
+#     aggfunc={
+#         'monto_venta': np.mean,
+#         'cuotas': np.mean,
+#         'edad': np.max,
+#         'nse_A': np.max,
+#         'nse_B': np.max,
+#         'nse_C': np.max,
+#         'nse_D': np.max,
+#         'genero_F': np.max,
+#         'genero_M': np.max
+#     }
+# ).reset_index()
 
 ## EDA
 # No hay nulos
@@ -141,4 +153,70 @@ silhouette_visualizer(KMeans(n_clusters=3, random_state=0), data_users[norm_cols
 plt.show()
 
 
-# %%
+# %% Plots
+# Boxplots: nse X monto venta
+plt.figure(figsize=(10, 5))
+sns.boxplot(data=data_users_2[data_users_2['monto_venta'] < 200], y='nse', x='monto_venta')
+plt.show()
+
+# Boxplots: nse X edad
+plt.figure(figsize=(10, 5))
+sns.boxplot(data=data_users_2[data_users_2['monto_venta'] < 200], y='nse', x='monto_venta')
+plt.show()
+
+# A mayor NSE, mayor promedio en monto de venta y también en edad
+
+
+# Boxplot
+fig, axes = plt.subplots(2, 2, figsize=(10, 10))
+sns.boxplot(data=data_users_A[(data_users_A['monto_venta'] < 200)], x='genero', y='monto_venta', ax=axes[0, 0])
+sns.boxplot(data=data_users_B[(data_users_B['monto_venta'] < 200)], x='genero', y='monto_venta', ax=axes[0, 1])
+sns.boxplot(data=data_users_C[(data_users_C['monto_venta'] < 200)], x='genero', y='monto_venta', ax=axes[1, 0])
+sns.boxplot(data=data_users_D[(data_users_D['monto_venta'] < 200)], x='genero', y='monto_venta', ax=axes[1, 1])
+add_stat_annotation(
+    axes[0, 0], 
+    data=data_users_A[(data_users_A['monto_venta'] < 200)], 
+    x='genero', 
+    y='monto_venta', 
+    box_pairs=[('F', 'M')], 
+    test='t-test_ind', 
+    text_format='full', 
+    loc='inside'
+)
+add_stat_annotation(
+    axes[0, 1], 
+    data=data_users_B[(data_users_B['monto_venta'] < 200)], 
+    x='genero', 
+    y='monto_venta', 
+    box_pairs=[('F', 'M')], 
+    test='t-test_ind', 
+    text_format='full', 
+    loc='inside'
+)
+add_stat_annotation(
+    axes[1, 0], 
+    data=data_users_C[(data_users_C['monto_venta'] < 200)], 
+    x='genero', 
+    y='monto_venta', 
+    box_pairs=[('F', 'M')], 
+    test='t-test_ind', 
+    text_format='full', 
+    loc='inside'
+)
+add_stat_annotation(
+    axes[1, 1], 
+    data=data_users_D[(data_users_D['monto_venta'] < 200)], 
+    x='genero', 
+    y='monto_venta', 
+    box_pairs=[('F', 'M')], 
+    test='t-test_ind', 
+    text_format='full', 
+    loc='inside'
+)
+fig.suptitle('Boxplots')
+plt.show()
+
+
+
+# %% 
+
