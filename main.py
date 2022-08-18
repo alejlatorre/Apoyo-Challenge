@@ -1,30 +1,21 @@
 # %% 0. Libraries
+import dtale
 import warnings
 import numpy as np
 import pandas as pd 
 import seaborn as sns
 import matplotlib.pyplot as plt
 
-from scipy import sparse
-from sklearn.metrics.pairwise import cosine_similarity
-
-from statannot import add_stat_annotation
-
 from sklearn.cluster import KMeans
-from sklearn.metrics import silhouette_score
-from sklearn.ensemble import IsolationForest
 from sklearn.preprocessing import MinMaxScaler
-from sklearn.neighbors import LocalOutlierFactor
 
-from yellowbrick.cluster import silhouette_visualizer
-
-from src.utils import scatter_plot
+from src.models import CFRecommender
 
 # %% 1. Settings
 warnings.filterwarnings('ignore')
 option_settings = {
-    'display.max_rows': None,
-    'display.max_columns': False,
+    'display.max_rows': False,
+    'display.max_columns': None,
     'display.float_format': '{:,.4f}'.format
 }
 [pd.set_option(setting, option) for setting, option in option_settings.items()]
@@ -41,13 +32,32 @@ dtype_dict = {'SKU': 'str'}
 filename = 'DataTransaccion.csv'
 data_ = pd.read_csv(IN_PATH + filename, sep=';', encoding='latin-1', dtype=dtype_dict)
 
-# %% 3. Format data
+# %% 3. EDA
+d = dtale.show(data_)
+dtale.instances()
+
+## EDA
+# No hay nulos
+# 17 jerarquias de SKU
+# 136 jerarquias2 de SKU
+# 308,947 usuarios
+# 140,939 SKUs
+
+# 1. Se identifico que un customer_id tiene doble genero: Puede que tenga el mismo código pero lo hacen dos personas distintas (tal vez convivientes)
+# 2. Se generó un nuevo customer_id => concatenando el customer_id previo con el género (+1k usuarios)
+# 3. Luego, se identificó que, de estos usuarios, 65 tienen doble NSE: 
+# 80 customer_id tienen doble genero (son dos personas distintas)
+# 115 customer_id tienen doble NSE
+
+# %% 4. Format data
 data = data_.copy()
 data.columns = map(str.lower, data)
+data.drop(index=data[data['edad'] == data['edad'].max()].index, inplace=True)
 data['diacompra_'] = pd.to_datetime(data['diacompra'], format='%m/%d/%Y', errors='coerce')
+data['codmes'] = data['diacompra_'].dt.strftime('%Y%m')
 print(f'Date errors represent: {data[data.diacompra_.isnull()].shape[0] / data.shape[0] * 100} % of total records.') 
-# Representan data de un dia, a nivel de serie de tiempo no se considerará pero para la segmentación sí
 
+# Creacion de variable ciudad
 districts = [
     'San Miguel',
     'San Borja', 
@@ -64,159 +74,260 @@ data.loc[data['localcompra'].isin(districts), 'city'] = 'Lima'
 data.loc[~data['localcompra'].isin(districts), 'city'] = data.loc[~data['localcompra'].isin(districts), 'localcompra']
 
 data['customer_id_'] = data['customer_id'] + '_' + data['genero'] + '_' + data['nse']
-
-
 data['quantity'] = 1
-subdata = pd.DataFrame(data.groupby(['sku'])['quantity'].sum().sort_values(ascending=False))
-sku_list = subdata[subdata['quantity'] > 7].index
-subdf = data[data['sku'].isin(sku_list)].copy()
 
+# Dividir por NSE
+data_a = data[data['nse']=='A'].copy()
+data_b = data[data['nse']=='B'].copy()
+data_c = data[data['nse']=='C'].copy()
+data_d = data[data['nse']=='D'].copy()
 
-# data.groupby(['jerarquiacompra'])['jerarquiacompra2'].nunique().sort_values(ascending=False)
+# Top 100 por c/NSE para disminuir dimensionalidad
+a_cust_id_top_100 = data_a.groupby(['customer_id_'])['monto_venta'].sum().sort_values(ascending=False)[:100].index
+b_cust_id_top_100 = data_b.groupby(['customer_id_'])['monto_venta'].sum().sort_values(ascending=False)[:100].index
+c_cust_id_top_100 = data_c.groupby(['customer_id_'])['monto_venta'].sum().sort_values(ascending=False)[:100].index
+d_cust_id_top_100 = data_d.groupby(['customer_id_'])['monto_venta'].sum().sort_values(ascending=False)[:100].index
 
-# data = pd.get_dummies(data, columns=['nse', 'genero'])
-# data_users = pd.pivot_table(
-#     data=data, 
-#     index='customer_id_',
-#     values=['monto_venta', 'cuotas', 'edad', 'nse_A', 'nse_B', 'nse_C', 'nse_D', 'genero_F', 'genero_M'],
-#     aggfunc={
-#         'monto_venta': np.mean,
-#         'cuotas': np.mean,
-#         'edad': np.max,
-#         'nse_A': np.max,
-#         'nse_B': np.max,
-#         'nse_C': np.max,
-#         'nse_D': np.max,
-#         'genero_F': np.max,
-#         'genero_M': np.max
-#     }
-# ).reset_index()
+# Filtro sobre base
+subset_a = data_a[data_a['customer_id_'].isin(a_cust_id_top_100)].copy()
+subset_b = data_b[data_b['customer_id_'].isin(b_cust_id_top_100)].copy()
+subset_c = data_c[data_c['customer_id_'].isin(c_cust_id_top_100)].copy()
+subset_d = data_d[data_d['customer_id_'].isin(d_cust_id_top_100)].copy()
 
-## EDA
-# No hay nulos
-# 17 jerarquias de SKU
-# 136 jerarquias2 de SKU
-# 308,947 usuarios
-# 140,939 SKUs
-
-
-# 1. Se identifico que un customer_id tiene doble genero: Puede que tenga el mismo código pero lo hacen dos personas distintas (tal vez convivientes)
-# 2. Se generó un nuevo customer_id => concatenando el customer_id previo con el género (+1k usuarios)
-# 3. Luego, se identificó que, de estos usuarios, 65 tienen doble NSE: 
-# 80 customer_id tienen doble genero (son dos personas distintas)
-# 115 customer_id tienen doble NSE
-
-# %% Model
-# Al utilizar métodos basados en distancias, es importante ver la distribución de las variables continuas
-isf = IsolationForest(n_estimators=100, random_state=123, contamination=0.02)
-preds = isf.fit_predict(data_users[['edad', 'monto_venta']])
-data_users['iso_forest_outliers'] = preds 
-data_users['iso_forest_outliers'] = data_users['iso_forest_outliers'].astype(str)
-data_users['iso_forest_scores'] = isf.decision_function(data_users[['edad', 'monto_venta']])
-data_users['iso_forest_outliers'].value_counts()
-
-lof = LocalOutlierFactor(n_neighbors=20)
-y_pred = lof.fit_predict(data_users[['edad', 'monto_venta']])
-data_users['lof_outliers'] = y_pred.astype(str)
-data_users['lof_scores'] = lof.negative_outlier_factor_
-data_users['lof_outliers'].value_counts()
-
-data_users['outliers_sum'] = (data_users['iso_forest_outliers'].astype(int) + data_users['lof_outliers'].astype(int))
-
-# Inicialmente se trató de hacer un ensamble de dos métodos de detección de outliers para las variables edad y monto_venta;
-# sin embargo, se clasificaron como outliers a personas que tienen un monto elevado debido a que estos han comprado productos bastante 
-# caros, como por ejemplo cocina G.ELECTRIC o video LG ELECTRONICS.
-# El unico outlier que se ha sacado es el que tiene edad de 999
-
-customer_outlier = data_users.loc[data_users['edad'] == data_users['edad'].max(), 'customer_id_']
-data = data[data['customer_id_'] != customer_outlier.values[0]]
-data_users = data_users[data_users['customer_id_'] != customer_outlier.values[0]]
-
-# %% Plots 
-fig, ax = plt.subplots(1, 1, figsize=(6, 5))
-sns.boxplot(data_users.loc[data_users['edad'] < 100, 'edad'], ax=ax)
-fig.suptitle('Boxplot de edad')
-plt.show()
-
-# %% KMeans
-scaler = MinMaxScaler()
-X = data_users[['cuotas', 'edad', 'monto_venta']].copy()
-norm_cols = ['norm_cuotas', 'norm_edad', 'norm_monto_venta']
-data_users[norm_cols] = scaler.fit_transform(X)
-
-print('Silhouette score for:')
-for i in range(3, 11):
-    labels=KMeans(n_clusters=i, init='k-means++', random_state=123).fit(data_users[norm_cols]).labels_
-    score=silhouette_score(data_users[norm_cols], labels, metric='euclidean', random_state=123)
-    print(f'{i} clusters: {score}')
-silhouette_visualizer(KMeans(n_clusters=3, random_state=0), data_users[norm_cols], colors='yellowbrick')
-plt.show()
-
+# Metricas por usuario por grupo de NSE
+data_users = pd.pivot_table(
+    data=data,
+    index=['customer_id_', 'nse'],
+    values=['monto_venta', 'cuotas', 'edad'],
+    aggfunc={
+        'monto_venta': np.sum,
+        'cuotas': np.mean,
+        'edad': np.max
+    }
+).reset_index()
+data_users_a = pd.pivot_table(
+    data=data_a,
+    index='customer_id_',
+    values=['monto_venta', 'cuotas', 'edad'],
+    aggfunc={
+        'monto_venta': np.sum,
+        'cuotas': np.mean,
+        'edad': np.max
+    }
+).reset_index()
+data_users_b = pd.pivot_table(
+    data=data_b,
+    index='customer_id_',
+    values=['monto_venta', 'cuotas', 'edad'],
+    aggfunc={
+        'monto_venta': np.sum,
+        'cuotas': np.mean,
+        'edad': np.max
+    }
+).reset_index()
+data_users_c = pd.pivot_table(
+    data=data_c,
+    index='customer_id_',
+    values=['monto_venta', 'cuotas', 'edad'],
+    aggfunc={
+        'monto_venta': np.sum,
+        'cuotas': np.mean,
+        'edad': np.max
+    }
+).reset_index()
+data_users_d = pd.pivot_table(
+    data=data_d,
+    index='customer_id_',
+    values=['monto_venta', 'cuotas', 'edad'],
+    aggfunc={
+        'monto_venta': np.sum,
+        'cuotas': np.mean,
+        'edad': np.max
+    }
+).reset_index()
 
 # %% Plots
+# Barplot: Sales in Lima
+pd.pivot_table(
+    data=data[(data['city'] == 'Lima')],
+    index='codmes',
+    columns='city',
+    values='monto_venta',
+    aggfunc=np.sum
+).plot(kind='bar', figsize=(10, 5))
+plt.title('Venta por mes en Lima', fontsize=15)
+plt.xlabel('Mes', fontsize=12)
+plt.ylabel('Venta (S/)', fontsize=12)
+plt.legend(loc='upper left')
+plt.show()
+
+# Lineplot: Sales per city (w/o Lima)
+pd.pivot_table(
+    data=data[(data['city'] != 'Lima')],
+    index='codmes',
+    columns='city',
+    values='monto_venta',
+    aggfunc=np.sum
+).plot(kind='line', figsize=(12, 5))
+plt.title('Venta por mes y provincia (excl. Lima)', fontsize=15)
+plt.xlabel('Mes', fontsize=12)
+plt.ylabel('Venta (S/)', fontsize=12)
+plt.legend(loc='upper left')
+plt.show()
+
+# %% Plots 
 # Boxplots: nse X monto venta
 plt.figure(figsize=(10, 5))
-sns.boxplot(data=data_users_2[data_users_2['monto_venta'] < 200], y='nse', x='monto_venta')
+sns.boxplot(data=data_users[data_users['monto_venta'] < 500], y='nse', x='monto_venta')
+plt.xlabel('Monto de venta', fontsize=12)
+plt.ylabel('NSE', fontsize=12)
+plt.title('Distribución de montos de venta por NSE', fontsize=15)
 plt.show()
 
 # Boxplots: nse X edad
 plt.figure(figsize=(10, 5))
-sns.boxplot(data=data_users_2[data_users_2['monto_venta'] < 200], y='nse', x='monto_venta')
+sns.boxplot(data=data_users[data_users['monto_venta'] < 500], y='nse', x='edad')
+plt.xlabel('Edad', fontsize=12)
+plt.ylabel('NSE', fontsize=12)
+plt.title('Distribución de edad por NSE', fontsize=15)
 plt.show()
 
-# A mayor NSE, mayor promedio en monto de venta y también en edad
+# %% Customer Segmentation
+list_of_user_df = {
+  'A': data_users_a,
+  'B': data_users_b,
+  'C': data_users_c,
+  'D': data_users_d
+}
+results = {}
 
+for nse, df in list_of_user_df.items():
+  # Scaling
+  scaler = MinMaxScaler()
+  norm_cols = ['norm_cuotas', 'norm_edad', 'norm_monto_venta']
+  df[norm_cols] = scaler.fit_transform(df[['cuotas', 'edad', 'monto_venta']])
 
-# Boxplot
-fig, axes = plt.subplots(2, 2, figsize=(10, 10))
-sns.boxplot(data=data_users_A[(data_users_A['monto_venta'] < 200)], x='genero', y='monto_venta', ax=axes[0, 0])
-sns.boxplot(data=data_users_B[(data_users_B['monto_venta'] < 200)], x='genero', y='monto_venta', ax=axes[0, 1])
-sns.boxplot(data=data_users_C[(data_users_C['monto_venta'] < 200)], x='genero', y='monto_venta', ax=axes[1, 0])
-sns.boxplot(data=data_users_D[(data_users_D['monto_venta'] < 200)], x='genero', y='monto_venta', ax=axes[1, 1])
-add_stat_annotation(
-    axes[0, 0], 
-    data=data_users_A[(data_users_A['monto_venta'] < 200)], 
-    x='genero', 
-    y='monto_venta', 
-    box_pairs=[('F', 'M')], 
-    test='t-test_ind', 
-    text_format='full', 
-    loc='inside'
-)
-add_stat_annotation(
-    axes[0, 1], 
-    data=data_users_B[(data_users_B['monto_venta'] < 200)], 
-    x='genero', 
-    y='monto_venta', 
-    box_pairs=[('F', 'M')], 
-    test='t-test_ind', 
-    text_format='full', 
-    loc='inside'
-)
-add_stat_annotation(
-    axes[1, 0], 
-    data=data_users_C[(data_users_C['monto_venta'] < 200)], 
-    x='genero', 
-    y='monto_venta', 
-    box_pairs=[('F', 'M')], 
-    test='t-test_ind', 
-    text_format='full', 
-    loc='inside'
-)
-add_stat_annotation(
-    axes[1, 1], 
-    data=data_users_D[(data_users_D['monto_venta'] < 200)], 
-    x='genero', 
-    y='monto_venta', 
-    box_pairs=[('F', 'M')], 
-    test='t-test_ind', 
-    text_format='full', 
-    loc='inside'
-)
-fig.suptitle('Boxplots')
+  # Get Elbow Method plot
+  WCSS = []
+  for i in range(1,11):
+      model = KMeans(n_clusters = i, init = 'k-means++')
+      model.fit(df[norm_cols])
+      WCSS.append(model.inertia_)
+  fig = plt.figure(figsize = (6, 3))
+  plt.plot(range(1,11), WCSS, linewidth=4, markersize=7, marker='o', color = 'green')
+  plt.xticks(np.arange(11))
+  plt.xlabel("Number of clusters")
+  plt.ylabel("WCSS")
+  plt.title(f'Elbow Method - {nse}')
+  plt.show()
+
+  results[nse] = pd.DataFrame(list(zip(range(1, 11), WCSS)), columns=['k', 'inertia'])
+  results[nse]['pct_change'] = results[nse]['inertia'].pct_change()
+  results[nse]['improvement'] = results[nse]['pct_change'] - results[nse]['pct_change'].shift(1) 
+
+model_a = KMeans(n_clusters=3, init='k-means++').fit(data_users_a[norm_cols])
+model_b = KMeans(n_clusters=3, init='k-means++').fit(data_users_b[norm_cols])
+model_c = KMeans(n_clusters=3, init='k-means++').fit(data_users_c[norm_cols])
+model_d = KMeans(n_clusters=3, init='k-means++').fit(data_users_d[norm_cols])
+
+data_users_a['cluster'] = model_a.predict(data_users_a[norm_cols])
+data_users_b['cluster'] = model_b.predict(data_users_b[norm_cols])
+data_users_c['cluster'] = model_c.predict(data_users_c[norm_cols])
+data_users_d['cluster'] = model_d.predict(data_users_d[norm_cols])
+
+# %% KMeans plots
+# NSE A
+colors = ['red', 'green', 'blue']
+assign = []
+for row in data_users_a['cluster'].values:
+    assign.append(colors[row])
+
+f1 = data_users_a['edad'].values
+f2 = data_users_a['cuotas'].values
+
+plt.figure(figsize=(7, 4))
+plt.scatter(f1, f2, c=assign, s=60)
+plt.xlabel('Edad', fontsize=12)
+plt.ylabel('Cuotas', fontsize=12)
+plt.title(f'Clusters de usuarios - NSE A', fontsize=15)
 plt.show()
 
+# NSE B
+colors = ['red', 'green', 'blue']
+assign = []
+for row in data_users_b['cluster'].values:
+    assign.append(colors[row])
 
+f1 = data_users_b['edad'].values
+f2 = data_users_b['cuotas'].values
 
-# %% 
+plt.figure(figsize=(7, 4))
+plt.scatter(f1, f2, c=assign, s=60)
+plt.xlabel('Edad')
+plt.ylabel('Cuotas')
+plt.title(f'Clusters de usuarios - NSE B')
+plt.show()
 
+# NSE C
+colors = ['red', 'green', 'blue']
+assign = []
+for row in data_users_c['cluster'].values:
+    assign.append(colors[row])
+
+f1 = data_users_c['edad'].values
+f2 = data_users_c['cuotas'].values
+
+plt.figure(figsize=(7, 4))
+plt.scatter(f1, f2, c=assign, s=60)
+plt.xlabel('Edad')
+plt.ylabel('Cuotas')
+plt.title(f'Clusters de usuarios - NSE C')
+plt.show()
+
+# NSE D
+colors = ['red', 'green', 'blue']
+assign = []
+for row in data_users_d['cluster'].values:
+    assign.append(colors[row])
+
+f1 = data_users_d['edad'].values
+f2 = data_users_d['cuotas'].values
+
+plt.figure(figsize=(7, 4))
+plt.scatter(f1, f2, c=assign, s=60)
+plt.xlabel('Edad')
+plt.ylabel('Cuotas')
+plt.title(f'Clusters de usuarios - NSE D')
+plt.show()
+
+# %% Recommendation System
+CFR_a = CFRecommender(dataframe=subset_a, user_col='customer_id_', item_col='sku', ranking_metric='quantity')
+CFR_b = CFRecommender(dataframe=subset_b, user_col='customer_id_', item_col='sku', ranking_metric='quantity')
+CFR_c = CFRecommender(dataframe=subset_c, user_col='customer_id_', item_col='sku', ranking_metric='quantity')
+CFR_d = CFRecommender(dataframe=subset_d, user_col='customer_id_', item_col='sku', ranking_metric='quantity')
+
+cf_preds_a = CFR_a.get_cf_predictions(number_of_factors_mf=15)
+cf_preds_b = CFR_b.get_cf_predictions(number_of_factors_mf=15)
+cf_preds_c = CFR_c.get_cf_predictions(number_of_factors_mf=15)
+cf_preds_d = CFR_d.get_cf_predictions(number_of_factors_mf=15)
+
+# Top 10 customers
+top_10_customers = data.groupby(['customer_id_'])['monto_venta'].sum().sort_values(ascending=False)[:10].index
+
+for idx, customer_id in enumerate(top_10_customers):
+    nse = customer_id[-1] 
+    if nse == 'A':
+        reco = CFR_a.get_recommended_items(cf_predictions_df=cf_preds_a, user_id=customer_id)
+    elif nse == 'B':
+        reco = CFR_b.get_recommended_items(cf_predictions_df=cf_preds_b, user_id=customer_id)
+    elif nse == 'C':
+        reco = CFR_c.get_recommended_items(cf_predictions_df=cf_preds_c, user_id=customer_id)
+    elif nse == 'D':
+        reco = CFR_d.get_recommended_items(cf_predictions_df=cf_preds_d, user_id=customer_id)
+    else:
+        print('NSE not found.')
+
+    print(f'Customer ranking: {idx+1}')
+    print(f'Customer ID: {customer_id[0:-4]}')
+    print('Recommended SKUs:')
+    print(reco)
